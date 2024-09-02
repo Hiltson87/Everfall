@@ -1,0 +1,137 @@
+* {
+    border: none;
+    border-radius: 0px;
+    /*font-family: VictorMono, Iosevka Nerd Font, Noto Sans CJK;*/
+    font-family:  Scary Pumpkin, Symbols Nerd Font, Jetbrains Mono;
+    font-size: 18px;
+    font-style: normal;
+    font-weight: bold;
+    min-height: 25px;
+}
+
+window#waybar {
+/*background-color: transparent;*/
+background:rgba(23, 24, 27, 0.75);
+border-radius: 0px;
+border: 1px solid #AF7148;
+-webkit-box-shadow: inset 5px -5px 5px 1px #2F2E2D;
+box-shadow: inset 5px -5px 5px 1px #2F2E2D;
+/*-webkit-box-shadow: 0px 0px 16px 8px rgba(117,104,162,0.98);
+box-shadow: 0px 0px 16px 8px rgba(117,104,162,0.98);
+box-shadow: 1px 1px 3px 10px #AF7148;
+*/
+
+}
+
+#custom-BoS {
+  background-image: url('/home/motor/Pictures/a8rkfw7rz.png');
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: contain;
+  font-family: Jetbrains Mono;
+  margin: 5;
+}
+
+#wlr.taskbar, #custom-spotify, #tray, #network, #idle_inhibitor, #network, #clock {
+    margin: 5;
+    color: #AF7148;
+}
+
+
+tooltip {
+    border-radius: 0px;
+    background-color: #232122;
+    font-family: Jetbrains Mono;
+}
+
+#custom-spotlogo{
+     text-shadow: #AF7148 0 -1px 4px, #AF7148 0 -2px 10px, #AF7148 0 -10px 20px, #AF7148 0 -18px 40px;
+}
+
+#custom-cavaOut2{
+    padding: 0px 5px;
+    color: #AF7148;
+    text-shadow: #AF7148 0 -1px 4px, #AF7148 0 -2px 10px, #AF7148 0 -10px 20px, #AF7148 0 -18px 40px;
+}
+
+#custom-weather{
+    color: #CFD0D0;
+        text-shadow: #AF7148 0 -1px 4px, #AF7148 0 -2px 10px, #AF7148 0 -10px 20px, #AF7148 0 -18px 40px;
+}
+
+#custom-power{
+  background-image: url('/home/motor/Pictures/a87ja21pb.png');
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: contain;
+  margin: 5;
+  font-family: Jetbrains Mono;
+}
+
+
+#custom-spotify, #clock{
+    color: #CFD0D0;
+        text-shadow: #AF7148 0 -1px 4px, #AF7148 0 -2px 10px, #AF7148 0 -10px 20px, #AF7148 0 -18px 40px;
+}
+
+#custom-weather, #clock, #custom-spotify {
+    margin: 8px;
+}
+
+workspaces{
+    padding: 0px 5px;
+
+}
+
+#taskbar{
+    padding: 0px 5px;
+}
+
+
+#custom-playerctl{
+    color: #AF7148;
+}
+
+#workspaces {
+        text-shadow: #AF7148 0 -1px 4px, #AF7148 0 -2px 10px, #AF7148 0 -10px 20px, #AF7148 0 -18px 40px;
+        padding: 3;
+}
+
+#workspaces button.active {
+    color: #CFD0D0;
+    background-color: #AF7148;
+    border-radius: 0px;
+    font-weight: bold;
+    text-shadow: #AF7148 0 -1px 4px, #AF7148 0 -2px 10px, #AF7148 0 -10px 20px, #AF7148 0 -18px 40px;
+}
+
+#workspaces button {
+    background-color: transparent;
+    color:  #CFD0D0;
+        text-shadow: #AF7148 0 -1px 4px, #AF7148 0 -2px 10px, #AF7148 0 -10px 20px, #AF7148 0 -18px 40px;
+}
+
+#workspaces button:hover {
+	background-color: #CFD0D0;
+	color: #AF7148;
+	border-radius: 0px;
+    font-weight: bold;
+        text-shadow: #AF7148 0 -1px 4px, #AF7148 0 -2px 10px, #AF7148 0 -10px 20px, #AF7148 0 -18px 40px;
+}
+
+#taskbar{
+    margin: 5px;
+}
+
+#taskbar button {
+    border-radius: 0px;
+        text-shadow: #AF7148 0 -1px 4px, #AF7148 0 -2px 10px, #AF7148 0 -10px 20px, #AF7148 0 -18px 40px;
+    margin: -5px;
+}
+
+#taskbar button:hover {
+    background-color: #AF7148;
+	border-radius: 0px;
+    font-weight: bold;
+        text-shadow: #AF7148 0 -1px 4px, #AF7148 0 -2px 10px, #AF7148 0 -10px 20px, #AF7148 0 -18px 40px;
+}

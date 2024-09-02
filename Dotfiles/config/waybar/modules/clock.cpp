@@ -1,0 +1,439 @@
+#include "modules/clock.hpp"
+
+#include <spdlog/spdlog.h>
+
+#include <iomanip>
+#include <regex>
+
+#include "util/ustring_clen.hpp"
+
+#ifdef HAVE_LANGINFO_1STDAY
+#include <langinfo.h>
+#include <locale.h>
+#endif
+
+namespace fmt_lib = waybar::util::date::format;
+
+waybar::modules::Clock::Clock(const std::string& id, const Json::Value& config)
+    : ALabel(config, "clock", id, "{:%H:%M}", 60, false, false, true),
+      locale_{std::locale(config_["locale"].isString() ? config_["locale"].asString() : "")},
+      tlpFmt_{(config_["tooltip-format"].isString()) ? config_["tooltip-format"].asString() : ""},
+      cldInTooltip_{tlpFmt_.find("{" + kCldPlaceholder + "}") != std::string::npos},
+      tzInTooltip_{tlpFmt_.find("{" + kTZPlaceholder + "}") != std::string::npos},
+      tzCurrIdx_{0} {
+  tlpText_ = tlpFmt_;
+
+  if (config_["timezones"].isArray() && !config_["timezones"].empty()) {
+    for (const auto& zone_name : config_["timezones"]) {
+      if (!zone_name.isString()) continue;
+      if (zone_name.asString().empty())
+        // local time should be shown
+        tzList_.push_back(nullptr);
+      else
+        try {
+          tzList_.push_back(locate_zone(zone_name.asString()));
+        } catch (const std::exception& e) {
+          spdlog::warn("Timezone: {0}. {1}", zone_name.asString(), e.what());
+        }
+    }
+  } else if (config_["timezone"].isString()) {
+    if (config_["timezone"].asString().empty())
+      // local time should be shown
+      tzList_.push_back(nullptr);
+    else
+      try {
+        tzList_.push_back(locate_zone(config_["timezone"].asString()));
+      } catch (const std::exception& e) {
+        spdlog::warn("Timezone: {0}. {1}", config_["timezone"].asString(), e.what());
+      }
+  }
+  if (!tzList_.size()) tzList_.push_back(nullptr);
+
+  // Calendar properties
+  if (cldInTooltip_) {
+    if (config_[kCldPlaceholder]["mode"].isString()) {
+      const std::string cfgMode{config_[kCldPlaceholder]["mode"].asString()};
+      const std::map<std::string_view, const CldMode&> monthModes{{"month", CldMode::MONTH},
+                                                                  {"year", CldMode::YEAR}};
+      if (monthModes.find(cfgMode) != monthModes.end())
+        cldMode_ = monthModes.at(cfgMode);
+      else
+        spdlog::warn(
+            "Clock calendar configuration mode \"{0}\" is not recognized. Mode = \"month\" is "
+            "using instead",
+            cfgMode);
+    }
+    if (config_[kCldPlaceholder]["weeks-pos"].isString()) {
+      if (config_[kCldPlaceholder]["weeks-pos"].asString() == "left") cldWPos_ = WS::LEFT;
+      if (config_[kCldPlaceholder]["weeks-pos"].asString() == "right") cldWPos_ = WS::RIGHT;
+    }
+    if (config_[kCldPlaceholder]["format"]["months"].isString())
+      fmtMap_.insert({0, config_[kCldPlaceholder]["format"]["months"].asString()});
+    else
+      fmtMap_.insert({0, "{}"});
+    if (config_[kCldPlaceholder]["format"]["weekdays"].isString())
+      fmtMap_.insert({1, config_[kCldPlaceholder]["format"]["weekdays"].asString()});
+    else
+      fmtMap_.insert({1, "{}"});
+
+    if (config_[kCldPlaceholder]["format"]["days"].isString())
+      fmtMap_.insert({2, config_[kCldPlaceholder]["format"]["days"].asString()});
+    else
+      fmtMap_.insert({2, "{}"});
+    if (config_[kCldPlaceholder]["format"]["today"].isString()) {
+      fmtMap_.insert({3, config_[kCldPlaceholder]["format"]["today"].asString()});
+      cldBaseDay_ =
+          year_month_day{
+              floor<days>(zoned_time{current_zone(), system_clock::now()}.get_local_time())}
+              .day();
+    } else
+      fmtMap_.insert({3, "{}"});
+    if (config_[kCldPlaceholder]["format"]["weeks"].isString() && cldWPos_ != WS::HIDDEN) {
+      fmtMap_.insert({4, std::regex_replace(config_[kCldPlaceholder]["format"]["weeks"].asString(),
+                                            std::regex("\\{\\}"),
+                                            (first_day_of_week() == Monday) ? "{:%W}" : "{:%U}")});
+      Glib::ustring tmp{std::regex_replace(fmtMap_[4], std::regex("</?[^>]+>|\\{.*\\}"), "")};
+      cldWnLen_ += tmp.size();
+    } else {
+      if (cldWPos_ != WS::HIDDEN)
+        fmtMap_.insert({4, (first_day_of_week() == Monday) ? "{:%W}" : "{:%U}"});
+      else
+        cldWnLen_ = 0;
+    }
+    if (config_[kCldPlaceholder]["mode-mon-col"].isInt()) {
+      cldMonCols_ = config_[kCldPlaceholder]["mode-mon-col"].asInt();
+      if (cldMonCols_ == 0u || (12 % cldMonCols_) != 0u) {
+        spdlog::warn(
+            "Clock calendar configuration mode-mon-col = {0} must be one of [1, 2, 3, 4, 6, 12]. "
+            "Value 3 is using instead",
+            cldMonCols_);
+        cldMonCols_ = 3u;
+      }
+    } else
+      cldMonCols_ = 1;
+    if (config_[kCldPlaceholder]["on-scroll"].isInt()) {
+      event_box_.add_events(Gdk::LEAVE_NOTIFY_MASK);
+      event_box_.signal_leave_notify_event().connect([this](GdkEventCrossing*) {
+        cldCurrShift_ = months{0};
+        return false;
+      });
+    }
+  }
+
+  thread_ = [this] {
+    dp.emit();
+    thread_.sleep_for(interval_ - system_clock::now().time_since_epoch() % interval_);
+  };
+}
+
+auto waybar::modules::Clock::update() -> void {
+  auto tz{tzList_[tzCurrIdx_] ?: current_zone()};
+  const zoned_time now{tz, floor<seconds>(system_clock::now())};
+
+  label_.set_markup(fmt_lib::vformat(locale_, format_, fmt_lib::make_format_args(now)));
+
+  if (tooltipEnabled()) {
+    const year_month_day today{floor<days>(now.get_local_time())};
+    const auto shiftedDay{today + cldCurrShift_};
+    const zoned_time shiftedNow{
+        tz, local_days(shiftedDay) + (now.get_local_time() - floor<days>(now.get_local_time()))};
+
+    if (tzInTooltip_) tzText_ = getTZtext(now.get_sys_time());
+    if (cldInTooltip_) cldText_ = get_calendar(today, shiftedDay, tz);
+    if (tzInTooltip_ || cldInTooltip_) {
+      // std::vformat doesn't support named arguments.
+      tlpText_ = std::regex_replace(tlpFmt_, std::regex("\\{" + kTZPlaceholder + "\\}"), tzText_);
+      tlpText_ =
+          std::regex_replace(tlpText_, std::regex("\\{" + kCldPlaceholder + "\\}"), cldText_);
+    }
+
+    tlpText_ = fmt_lib::vformat(locale_, tlpText_, fmt_lib::make_format_args(shiftedNow));
+
+    label_.set_tooltip_markup(tlpText_);
+  }
+
+  ALabel::update();
+}
+
+auto waybar::modules::Clock::getTZtext(sys_seconds now) -> std::string {
+  if (tzList_.size() == 1) return "";
+
+  std::stringstream os;
+  for (size_t tz_idx{0}; tz_idx < tzList_.size(); ++tz_idx) {
+    if (static_cast<int>(tz_idx) == tzCurrIdx_) continue;
+    auto zt{zoned_time{tzList_[tz_idx], now}};
+    os << fmt_lib::vformat(locale_, format_, fmt_lib::make_format_args(zt)) << '\n';
+  }
+
+  return os.str();
+}
+
+const unsigned cldRowsInMonth(const year_month& ym, const weekday& firstdow) {
+  return 2u + ceil<weeks>((weekday{ym / 1} - firstdow) + ((ym / last).day() - day{0})).count();
+}
+
+auto cldGetWeekForLine(const year_month& ym, const weekday& firstdow, const unsigned line)
+    -> const year_month_weekday {
+  unsigned index{line - 2};
+  if (weekday{ym / 1} == firstdow) ++index;
+  return ym / firstdow[index];
+}
+
+auto getCalendarLine(const year_month_day& currDate, const year_month ym, const unsigned line,
+                     const weekday& firstdow, const std::locale* const locale_) -> std::string {
+  std::ostringstream os;
+
+  switch (line) {
+    // Print month and year title
+    case 0: {
+      os << date::format(*locale_, "{:L%B %Y}", ym);
+      break;
+    }
+    // Print weekday names title
+    case 1: {
+      auto wd{firstdow};
+      Glib::ustring wdStr;
+      Glib::ustring::size_type wdLen{0};
+      int clen{0};
+      do {
+        wdStr = date::format(*locale_, "{:L%a}", wd);
+        clen = ustring_clen(wdStr);
+        wdLen = wdStr.length();
+        while (clen > 2) {
+          wdStr = wdStr.substr(0, wdLen - 1);
+          --wdLen;
+          clen = ustring_clen(wdStr);
+        }
+        const std::string pad(2 - clen, ' ');
+
+        if (wd != firstdow) os << ' ';
+
+        os << pad << wdStr;
+      } while (++wd != firstdow);
+      break;
+    }
+    // Print first week prefixed with spaces if necessary
+    case 2: {
+      auto wd{weekday{ym / 1}};
+      os << std::string((wd - firstdow).count() * 3, ' ');
+
+      if (currDate != ym / 1d)
+        os << date::format(*locale_, "{:L%e}", 1d);
+      else
+        os << "{today}";
+
+      auto d{2d};
+      while (++wd != firstdow) {
+        if (currDate != ym / d)
+          os << date::format(*locale_, " {:L%e}", d);
+        else
+          os << " {today}";
+
+        ++d;
+      }
+      break;
+    }
+    // Print non-first week
+    default: {
+      auto ymdTmp{cldGetWeekForLine(ym, firstdow, line)};
+      if (ymdTmp.ok()) {
+        auto d{year_month_day{ymdTmp}.day()};
+        const auto dlast{(ym / last).day()};
+        auto wd{firstdow};
+
+        if (currDate != ym / d)
+          os << date::format(*locale_, "{:L%e}", d);
+        else
+          os << "{today}";
+
+        while (++wd != firstdow && ++d <= dlast) {
+          if (currDate != ym / d)
+            os << date::format(*locale_, " {:L%e}", d);
+          else
+            os << " {today}";
+        }
+        // Append row with spaces if the week was not completed
+        os << std::string((firstdow - wd).count() * 3, ' ');
+      }
+      break;
+    }
+  }
+
+  return os.str();
+}
+
+auto waybar::modules::Clock::get_calendar(const year_month_day& today, const year_month_day& ymd,
+                                          const time_zone* tz) -> const std::string {
+  const auto firstdow{first_day_of_week()};
+  const auto maxRows{12 / cldMonCols_};
+  const auto ym{ymd.year() / ymd.month()};
+  const auto y{ymd.year()};
+  const auto d{ymd.day()};
+
+  std::ostringstream os;
+  std::ostringstream tmp;
+
+  if (cldMode_ == CldMode::YEAR) {
+    if (y / month{1} / 1 == cldYearShift_)
+      if (d == cldBaseDay_ || (uint)cldBaseDay_ == 0u)
+        return cldYearCached_;
+      else
+        cldBaseDay_ = d;
+    else
+      cldYearShift_ = y / month{1} / 1;
+  }
+  if (cldMode_ == CldMode::MONTH) {
+    if (ym == cldMonShift_)
+      if (d == cldBaseDay_ || (uint)cldBaseDay_ == 0u)
+        return cldMonCached_;
+      else
+        cldBaseDay_ = d;
+    else
+      cldMonShift_ = ym;
+  }
+  // Pad object
+  const std::string pads(cldWnLen_, ' ');
+  // Compute number of lines needed for each calendar month
+  unsigned ml[12]{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+
+  for (auto& m : ml) {
+    if (cldMode_ == CldMode::YEAR || m == static_cast<unsigned>(ymd.month()))
+      m = cldRowsInMonth(y / month{m}, firstdow);
+    else
+      m = 0u;
+  }
+
+  for (auto row{0u}; row < maxRows; ++row) {
+    const auto lines{*std::max_element(std::begin(ml) + (row * cldMonCols_),
+                                       std::begin(ml) + ((row + 1) * cldMonCols_))};
+    for (auto line{0u}; line < lines; ++line) {
+      for (auto col{0u}; col < cldMonCols_; ++col) {
+        const auto mon{month{row * cldMonCols_ + col + 1}};
+        if (cldMode_ == CldMode::YEAR || y / mon == ym) {
+          const year_month ymTmp{y / mon};
+          if (col != 0 && cldMode_ == CldMode::YEAR) os << std::string(3, ' ');
+
+          // Week numbers on the left
+          if (cldWPos_ == WS::LEFT && line > 0) {
+            if (line > 1) {
+              if (line < ml[(unsigned)ymTmp.month() - 1u]) {
+                os << fmt_lib::vformat(
+                          locale_, fmtMap_[4],
+                          fmt_lib::make_format_args(
+                              (line == 2)
+                                  ? static_cast<const date::zoned_seconds&&>(
+                                        zoned_seconds{tz, local_days{ymTmp / 1}})
+                                  : static_cast<const date::zoned_seconds&&>(zoned_seconds{
+                                        tz, local_days{cldGetWeekForLine(ymTmp, firstdow, line)}})))
+                   << ' ';
+              } else
+                os << pads;
+            }
+          }
+
+          os << Glib::ustring::format((cldWPos_ != WS::LEFT || line == 0) ? std::left : std::right,
+                                      std::setfill(L' '),
+                                      std::setw(cldMonColLen_ + ((line < 2) ? cldWnLen_ : 0)),
+                                      getCalendarLine(today, ymTmp, line, firstdow, &locale_));
+
+          // Week numbers on the right
+          if (cldWPos_ == WS::RIGHT && line > 0) {
+            if (line > 1) {
+              if (line < ml[(unsigned)ymTmp.month() - 1u])
+                os << ' '
+                   << fmt_lib::vformat(
+                          locale_, fmtMap_[4],
+                          fmt_lib::make_format_args(
+                              (line == 2) ? static_cast<const date::zoned_seconds&&>(
+                                                zoned_seconds{tz, local_days{ymTmp / 1}})
+                                          : static_cast<const date::zoned_seconds&&>(
+                                                zoned_seconds{tz, local_days{cldGetWeekForLine(
+                                                                      ymTmp, firstdow, line)}})));
+              else
+                os << pads;
+            }
+          }
+        }
+      }
+      // Apply user's formats
+      if (line < 2)
+        tmp << fmt_lib::vformat(
+            locale_, fmtMap_[line],
+            fmt_lib::make_format_args(static_cast<const std::string_view&&>(os.str())));
+      else
+        tmp << os.str();
+      // Clear ostringstream
+      std::ostringstream().swap(os);
+      if (line + 1u != lines || (row + 1u != maxRows && cldMode_ == CldMode::YEAR)) tmp << '\n';
+    }
+    if (row + 1u != maxRows && cldMode_ == CldMode::YEAR) tmp << '\n';
+  }
+
+  os << std::regex_replace(
+      fmt_lib::vformat(locale_, fmtMap_[2],
+                       fmt_lib::make_format_args(static_cast<const std::string_view&&>(tmp.str()))),
+      std::regex("\\{today\\}"),
+      fmt_lib::vformat(locale_, fmtMap_[3],
+                       fmt_lib::make_format_args(
+                           static_cast<const std::string_view&&>(date::format("{:L%e}", d)))));
+
+  if (cldMode_ == CldMode::YEAR)
+    cldYearCached_ = os.str();
+  else
+    cldMonCached_ = os.str();
+
+  return os.str();
+}
+
+// Actions handler
+auto waybar::modules::Clock::doAction(const std::string& name) -> void {
+  if (actionMap_[name]) {
+    (this->*actionMap_[name])();
+  } else
+    spdlog::error("Clock. Unsupported action \"{0}\"", name);
+}
+
+// Module actions
+void waybar::modules::Clock::cldModeSwitch() {
+  cldMode_ = (cldMode_ == CldMode::YEAR) ? CldMode::MONTH : CldMode::YEAR;
+}
+void waybar::modules::Clock::cldShift_up() {
+  cldCurrShift_ += (months)((cldMode_ == CldMode::YEAR) ? 12 : 1);
+}
+void waybar::modules::Clock::cldShift_down() {
+  cldCurrShift_ -= (months)((cldMode_ == CldMode::YEAR) ? 12 : 1);
+}
+void waybar::modules::Clock::tz_up() {
+  const auto tzSize{tzList_.size()};
+  if (tzSize == 1) return;
+  size_t newIdx{tzCurrIdx_ + 1lu};
+  tzCurrIdx_ = (newIdx == tzSize) ? 0 : newIdx;
+}
+void waybar::modules::Clock::tz_down() {
+  const auto tzSize{tzList_.size()};
+  if (tzSize == 1) return;
+  tzCurrIdx_ = (tzCurrIdx_ == 0) ? tzSize - 1 : tzCurrIdx_ - 1;
+}
+
+#ifdef HAVE_LANGINFO_1STDAY
+template <auto fn>
+using deleter_from_fn = std::integral_constant<decltype(fn), fn>;
+
+template <typename T, auto fn>
+using deleting_unique_ptr = std::unique_ptr<T, deleter_from_fn<fn>>;
+#endif
+
+// Computations done similarly to Linux cal utility.
+auto waybar::modules::Clock::first_day_of_week() -> weekday {
+#ifdef HAVE_LANGINFO_1STDAY
+  deleting_unique_ptr<std::remove_pointer<locale_t>::type, freelocale> posix_locale{
+      newlocale(LC_ALL, locale_.name().c_str(), nullptr)};
+  if (posix_locale) {
+    const auto i{(int)((std::intptr_t)nl_langinfo_l(_NL_TIME_WEEK_1STDAY, posix_locale.get()))};
+    const weekday wd{year_month_day{year(i / 10000) / month(i / 100 % 100) / day(i % 100)}};
+    const auto j{(uint8_t)*nl_langinfo_l(_NL_TIME_FIRST_WEEKDAY, posix_locale.get())};
+    return wd + days{j - 1};
+  }
+#endif
+  return Sunday;
+}
